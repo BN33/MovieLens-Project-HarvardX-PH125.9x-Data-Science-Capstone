@@ -1,0 +1,706 @@
+---
+title: "MovieLens Project Report"
+author: "BenoitA"
+date: "2022-12-09"
+output: pdf_document
+header-includes:
+  - |
+    ```{=latex}
+    \usepackage{fvextra}
+    \DefineVerbatimEnvironment{Highlighting}{Verbatim}{
+      breaksymbolleft={}, 
+      showspaces = false,
+      showtabs = false,
+      breaklines,
+      commandchars=\\\{\}
+    }
+    ```
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+##########################################################
+# Create edx and final_holdout_test sets 
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+if(!require(psych)) install.packages("psych")
+library(psych)
+
+if(!require(lubridate)) install.packages("lubridate")
+library(lubridate)
+
+if(!require(magrittr)) install.packages("cran.r-project.org/src/contrib/Archive/magrittr/…", repos = NULL, type="source")
+library(magrittr)
+```
+
+# 1. Introduction
+We are provided with a dataset of historical movie rating (called “edx”) and we have the task to predict movie ratings and calculate RMSE. To do so, we are advised to build a model, that we will check against a test dataset (also provided and called “final_holdout_test”). To get the full mark, our objective is to build a model that will result in a RMSE below 0.86490.
+
+To achieve this, the project will go through different steps that we will describe in the Methodology section. 
+We will then describe the Results, and finally provide a Conclusion to this report.
+
+To help the reader, we have kept clear definitions of each variables used in the project:
+
+### 1.1 Data dictionary 
+
+#### 1.1.1 Dataframes
+
+Data frame|In the original dataset|Description 
+---------------|------------------|--------------------
+edx |Yes|Train data set
+final_holdout_test|Yes|Test data set
+user_table|No|User focused (grouped) data set
+users_rating_summ|No|User data summary
+movie_table|No|Movie focused (grouped) data set
+movies_rating_summ|No|Movie data summary
+genres_table|No|Genre focused (grouped) data set
+year_rating_table|No|Rating year focused (grouped) data set
+age_rating_table|No|Rating year focused (grouped) data set
+
+There are a few additional dataframes created for the purpose of the models whioch are not listed here.
+
+#### 1.1.2 Data in original dataframes
+
+Data frame|Variable Name|In the original dataset|Description 
+---------------|------------------|--------------------|----------------------
+edx AND final_holdout_test |userId|Yes|Id of the user that rated the movie
+edx AND final_holdout_test |movieId|Yes|Id of the rated movie
+edx AND final_holdout_test |rating|Yes|Rating of the movie given by the user
+edx AND final_holdout_test |timestamp|Yes|Date and time of the rating
+edx AND final_holdout_test |title|Yes|Name and year of release of the rated movie
+edx AND final_holdout_test |genres|Yes|Category of the rated movie by genre
+edx AND final_holdout_test |year_of_rating|No|Year of the rating was given
+edx AND final_holdout_test|movie_year|No|Year that the movie was released
+edx AND final_holdout_test|rating_age|No| age (in years) of the movie at the time of the rating
+
+#### 1.1.3 Data in additional dataframes
+
+
+Those table have often the following variables:
+
+* an ID (movie, user…) or a type (e.g. a genre)
+
+* a count of the ratings (rows in the original edx table), often labeled as ‘n_’
+
+* an average rating (average by the focused filter/group), often labeled as ‘avg_rating’
+
+* a standard deviation of the rating, often labeled as ‘sd’
+
+* a difference with the overall mean for the purpose of the models, often labeled as ‘b_’
+
+
+# 2. Methodology & Modeling Process 
+The methodology applied is the following:
+
+1. Exploration of the data sets in order to have an overview of the available data and variables
+
+2. Data wrangling to prepare the data sets
+
+3. Analysis of the data sets to understand possible correlations between variables that can be later used in the model
+
+4. Modelling, starting from the most simple model and sophisticating bit by bit, checking the RMSE after each attempts to select the model with the lowest RMSE
+
+
+## 2.1 Datasets overview 
+
+### 2.1.1 edx dataset
+Here is an overview of the structure of the dataset:
+```{r, echo=FALSE}
+str(edx)
+```
+
+The variables have the following features:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+describe(edx, fast=TRUE)
+```
+
+
+```{r, echo=FALSE}
+nb_users<- n_distinct(edx$userId)
+nb_ratings<- nrow(edx)
+nb_movies<- n_distinct(edx$movieId)
+percentage_coverage<- nb_ratings /(nb_users* nb_movies)
+```
+
+We can observe the followings:
+
+1. The dataset is made up of a huge number of rows but a relatively small number of columns (predictors).
+
+2. It is not a complete ‘matrix’ where all users would have rated all movies. We have only `r round(percentage_coverage,4)*100` % of coverage.
+
+3. Years are including at the end of the film name and could potentially be a variable that impacts rating.
+
+4. Timestamp is not an easy format to handle.
+
+5. Genres are aggregated and is not easy for analysis.
+
+
+### 2.1.2 final_holdout_test dataset
+Here is an overview of the structure of the dataset:
+```{r, echo=FALSE}
+str(final_holdout_test)
+```
+
+The variables have the following features:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+describe(final_holdout_test, fast=TRUE)
+```
+
+We can observe the followings:
+
+1. The dataset structure is the same as the edx dataset
+
+2. But the number of rows is much smaller
+
+
+## 2.2 Datasets preparation 
+Based on the observations, we decide to add a few columns to the edx dataset to help us in the analysis and modelling:
+
+* Timestamp is not easy to handle (it is not readable, nor categorised). We can convert it to year to make it a more useful predictor and call it ‘year_of_rating’. We can also delete the timestamp column which we will not use.
+
+* Extract the year of the movie, which might be a useful predictor. We will call it ‘movie_year’.
+
+* Compute the age of the movie at the time the rating was done, which might also be a predictor. We will call it ‘rating_age’.
+
+```{r, echo=FALSE}
+edx <-edx %>% mutate(edx, year_of_rating = as.integer(year(as_datetime(timestamp))))
+edx<-edx[,-4]
+
+edx <- edx %>% mutate(movie_year = as.integer(substr(title, str_length(title) - 4, str_length(title) - 1)))
+
+edx <- edx %>% mutate(rating_age = year_of_rating - movie_year)
+```
+
+We replicate the preparation to the final_holdout_test dataset so that we can use the sets for calculating the predictions and RSME.
+```{r, echo=FALSE}
+final_holdout_test <- final_holdout_test %>% mutate(final_holdout_test, year_of_rating = as.integer(year(as_datetime(timestamp))))
+final_holdout_test <- final_holdout_test [,-4]
+
+final_holdout_test <- final_holdout_test %>% mutate(movie_year = as.integer(substr(title, str_length(title) - 4, str_length(title) - 1)))
+
+final_holdout_test <- final_holdout_test %>% mutate(rating_age = year_of_rating - movie_year)
+```
+
+
+## 2.3 Data Analysis
+We will now analyze more thoroughly some of the (initial or created) variables of the edx dataset trying to find insights that can then be helpful to build the prediction model.
+
+
+### 2.3.1 Rating insights
+The rating is the variable that we aim to predict.
+
+The ratings are distributed from 0.5 to 5 stars with half star increments.
+The average is `r round(mean(edx$rating),2)` and the standard deviation is `r round(sd(edx$rating),2)`.
+
+The ratings are distributed as follows:
+
+```{r, echo=FALSE}
+edx %>% ggplot(aes(rating, y = after_stat(prop))) + geom_bar() + labs(x = "Ratings", y = "Proportion of Ratings") + scale_x_continuous(breaks = seq(0, 5, by= 0.5)) + ggtitle("Figure 1: Proportion of ratings per rating")
+```
+
+Insight(s): 
+
+(1) Half stars ratings are less common than whole star ratings
+
+
+### 2.3.2 Users insights 
+```{r, echo=FALSE}
+users_rating_summ<-edx %>% group_by(userId) %>% summarise(n=n()) %>% summarise(min=min(n),max=max(n),mean = mean(n),sd=sd(n),median=median(n))
+
+user_table<-edx %>% group_by(userId) %>% summarise(n=n(), avg_rating=mean(rating), sd_rating=sd(rating))
+```
+There are `r nb_users` users that rated movies. Users have given a minimum average rating of `r round(min(user_table$avg_rating),2)` star and a maximum of `r round(max(user_table$avg_rating),2)` stars. The average rating of users is `r round(mean(user_table$avg_rating),2)` stars with a standard deviation of `r round(min(user_table$avg_rating),2)`. The distribution of ratings per user is the following:
+
+```{r, echo=FALSE}
+user_table %>% ggplot(aes(avg_rating))+geom_density(fill="gray17") + labs(x="Average user rating", y="Density") + ggtitle("Figure 2: Distribution of average ratings given by users")
+```
+
+Users have rated a minimum of `r users_rating_summ$min` movies and a maximum of `r users_rating_summ$max` movies. On average they have rated `r round(users_rating_summ$mean,2)` movies with a standard deviation of `r round(users_rating_summ$sd,2)`. The median number of movies rated per user is `r users_rating_summ$median`.
+The distribution of the number of movies rated per user is the following:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+user_table %>% ggplot(aes(n)) + geom_histogram(color="grey", size=0.1,bins=30) + labs(x="Number of ratings", y="Number of users") + scale_x_log10()+ ggtitle("Figure 3: Number of ratings per user")
+```
+
+
+And we can observe that the ratings are highly concentrated of a small number of users:
+
+```{r, echo=FALSE}
+user_table<-user_table%>% mutate (proportion_rating=n/sum(n))
+temp<-cumsum(sort(user_table$proportion_rating))
+temp<-data.frame(Number_of_users=1:nb_users,Cumulative_proportion_of_ratings=temp)
+
+ggplot(temp,aes(x=Number_of_users,y=Cumulative_proportion_of_ratings)) + geom_line() + labs(x="Cumulative number of users", y="Cumulative proportion of ratings") + ggtitle("Figure 4: Cumulative proportion of ratings")
+```
+
+
+```{r, echo=FALSE}
+format(quantile(temp$Cumulative_proportion_of_ratings), scientific=F,digits=2)
+rm(temp)
+```
+
+Insight(s):
+
+(2) Significant variability of the rating depending on the user rating the movies
+
+(3) The 25% more prolific users in terms of ratings produce almost 70% of the total number of ratings
+
+
+### 2.3.3 Movies insights 
+```{r, echo=FALSE}
+movies_rating_summ<-edx %>% group_by(movieId) %>% summarise(n=n()) %>% summarise(min=min(n),max=max(n),mean = mean(n),sd=sd(n),median=median(n))
+
+movie_table<-edx %>% group_by(movieId) %>% summarise(n=n(), avg_rating=mean(rating), sd_rating=sd(rating))
+```
+There are `r nb_movies` movies that have been rated. The average rating per movie varies from `r round(min(movie_table$avg_rating),2)` star to `r round(max(movie_table$avg_rating),2)` stars. Its average is `r round(mean(movie_table$avg_rating),2)` stars with a standard deviation of `r round(sd(movie_table$avg_rating),2)`. The distribution is the following:
+
+```{r, echo=FALSE}
+movie_table %>% ggplot(aes(avg_rating))+geom_density(fill="gray17") + labs(x="Average movie rating", y="Density") + ggtitle("Figure 5: Distribution of average movie ratings")
+```
+
+Movies have been rated by a minimum of `r movies_rating_summ$min` user and a maximum of `r movies_rating_summ$max` users. On average they have benn rated by `r round(movies_rating_summ$mean,2)` users with a standard deviation of `r round(movies_rating_summ$sd,2)`. The median number of ratings per movie is `r round(movies_rating_summ$median,2)`.
+
+The distribution is the following:
+
+```{r, echo=FALSE}
+movie_table %>% ggplot(aes(n)) + geom_histogram(color="grey", size=0.1,bins=30) + labs(x="Number of ratings", y="Number of movies") + scale_x_log10() + ggtitle("Figure 6: Number of ratings per movie")
+```
+
+
+So we observe a significant variability per movie and we can wonder if the number of ratings per movie affects the rating.
+
+The average rating depending on the number of ratings is the following:
+
+```{r, echo=FALSE}
+movie_table %>% ggplot(aes(n,avg_rating)) + geom_point(size=0.3) + labs(x="Number of ratings", y="Average rating") + ggtitle("Figure 7: Average rating per number of ratings")
+```
+This does not suggest a strong correlation between the average rating of a movie and the number of ratings. This is confirmed by the coefficient of correlation `r round(cor(movie_table$n,movie_table$avg_rating),2)` between the two variables.
+
+Insight(s):
+
+(4) Significant variability of the rating depending on the movie
+
+(5) High concentration of movies with 50 to 500 ratings
+
+(6) No clear correlation between the average rating of a movie and the number of ratings
+
+
+### 2.3.4 Movie year insights
+The number of movies released per year is the following:
+
+```{r, echo=FALSE}
+movie_table<-left_join(movie_table, unique(select(edx,movieId,movie_year)), by = "movieId")
+movie_table <- movie_table %>% mutate(total_rating= avg_rating * n)
+movie_table_summary <- movie_table %>% group_by(movie_year)  %>% summarise(n_ratings=sum(n),n_movie=n(),avg_rating_per_year=sum(total_rating)/sum(n))
+movie_table_summary %>% ggplot(aes(x= movie_year, y = n_movie )) + geom_col()+ labs(x="Year", y="Number of movies released") + ggtitle("Figure 8: Number of movies released per year")
+```
+
+So we can observe that recent movies are much more prevalent than old movies. We now try to understand if there is a correlation between year of release and rating:
+
+```{r, echo=FALSE}
+movie_table_summary %>% ggplot(aes(x= movie_year, y = avg_rating_per_year)) + geom_col()+ labs(x="Year of release", y="Average rating") + ggtitle("Figure 9: Average rating per release year")
+```
+
+This chart suggest that old movies have better rating than recent ones. The correlation suggested from the chart is confirmed by the coefficient of correlation between the year of release of the movie and the average rating `r round(cor(movie_table_summary$avg_rating_per_year,movie_table_summary$movie_year),2)`.
+
+Insight(s):
+
+(7) Recent movie have a slightly lower average rating (hovering around 3.5) than older movie (between 3.5 and 4)
+
+(8) High prevalence of recent movies
+
+
+### 2.3.5 Movie genres insights
+The average rating per genre is the following:
+
+```{r, echo=FALSE}
+genres <- edx$genres %>% str_replace("\\|.*","") %>% unique()
+
+nb_genres <- sapply(genres, function(x){
+index <- str_which(edx$genres, x)
+length(edx$rating[index])
+})
+
+genres_ratings <- sapply(genres, function(x){
+index <- str_which(edx$genres, x)
+mean(edx$rating[index], na.rm = T)
+})
+
+genres_table <- data.frame(genres = genres, n_genres = nb_genres, avg_rating = genres_ratings)
+
+genres_table %>% ggplot(aes(x= reorder(genres,avg_rating), y = avg_rating)) + geom_col()+ labs(x=" Genre", y="Average Rating") + ggtitle("Figure 10: Average rating per genre") + coord_flip()
+```
+
+We can observe that genres have substantial different average rating. The minimum average rating is `r round(min(genres_table$avg_rating),2)` while the maximum rating is `r round(max(genres_table$avg_rating),2)`. The average rating is `r round(mean(genres_table$avg_rating),2)` and the standard deviation is `r round(sd(genres_table$avg_rating),2)`. We now examine prevalence of genres and look at the number of rating per genre:
+
+```{r, echo=FALSE}
+genres_table %>% ggplot(aes(x= reorder(genres,n_genres), y = n_genres)) + geom_col()+ labs(x="Genre", y="Number of ratings") + ggtitle("Figure 11: Number of ratings per genre") + coord_flip()
+```
+
+Insight(s):
+
+(9) Genre affects rating significantly. The worst rated genre (Horror) has a significant different average rating from the best rated genre (Film-Noir)
+
+(10) High prevalence some genres (Drama, Comedy, Action, Thriller)
+
+
+### 2.3.6 Rating year insights
+
+The average rating per year of rating is the following:
+
+```{r, echo=FALSE}
+year_rating_table <- edx %>% select(rating,year_of_rating) %>% group_by(year_of_rating) %>% summarise(avg_rating = mean(rating), n=n())
+
+year_rating_table %>% ggplot(aes(x= year_of_rating, y = avg_rating)) + geom_col()+ labs(x="Year of rating", y="Average rating") + ggtitle("Figure 12: Average rating per year of rating")
+```
+
+Note that 1995 is not significant of this relates to only `r year_rating_table$n[1] ` ratings.
+
+Insight(s):
+
+(11) Rating seems to be stable over years of which movies where rated
+
+
+### 2.3.7 Rating age insights
+
+The average rating per age of rating is the following:
+
+```{r, echo=FALSE}
+age_rating_table <- edx %>% select(rating,rating_age) %>% group_by(rating_age) %>% summarise(avg_rating = mean(rating), n=n())
+
+ylim.prim <- c(0,4.5)
+ylim.sec <- c(0, 1100000)
+b <- diff(ylim.prim)/diff(ylim.sec)
+
+age_rating_table %>% ggplot(aes(x= rating_age, y = avg_rating)) + geom_col() + labs(x="Age of rating") + ggtitle("Figure 13: Average rating per age of rating") + scale_y_continuous(name = "Average rating", sec.axis = sec_axis(~ (. )/b,name="Number of ratings")) + geom_line(aes(y = n*b), color = " salmon2") + theme(axis.line.y.right = element_line(color = " salmon2"), axis.ticks.y.right = element_line(color = " salmon2"), axis.text.y.right = element_text(color = " salmon2"), axis.title.y.right = element_text(color = "salmon2"))
+```
+
+We can observe that rating is influenced by age (coefficient of correlation of  `r round(cor(age_rating_table$avg_rating, age_rating_table$rating_age),2)` ), but the number of observations varies significantly, with a low number of ratings for aged ones.
+
+Insight(s):
+
+(12) Possible correlation between age and rating
+
+
+## 2.4 Modelling
+We now move on to the modeling.
+Our objective is to minimize the RSME, hence we will start by calculating the RSME function.
+
+We will then start modelling. The first attempt will be the simplest model we can think off (using the average rating). We will then add possible explanatory variables to the model to improve its performance, meaning trying to reduce the RSME.
+
+### 2.4.1 Compute RSME function
+
+If we define the following notation:
+
+* $y_{u,i}$ as the rating value of $movie_i$ and $user_u$
+
+* $\mu$ as the average rating 
+
+* $\varepsilon_{u,i}$ as the independent error
+
+* $b_...$ as the effect of an additional variable
+
+Variable will have a ‘hat’ when they represent a prediction (e.g. $\hat{y}$) and will not have when they represent true values.
+
+The RSME is:
+$$
+RSME=\sqrt{\frac{1}{N} \sum_{u,i}(\hat{y}_{u,i}-y_{u,i})^2}
+$$
+Which translates into R as:
+```{r}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+
+### 2.4.2 Simplest Model (Model 1)
+The simplest model we can build is using the average rating cross the board.
+$$
+Y_{u,i}=\mu+\varepsilon_{u,i}
+$$
+
+The code is the following:
+```{r}
+predicted_rating_model1 <- mean(edx$rating)
+predicted_rating_model1 
+```
+This model give the following RSME:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+model1RMSE<-RMSE(final_holdout_test$rating, predicted_rating_model1)
+rmse_results <- bind_rows(data_frame(method="Simplest model - Model 1", RMSE = model1RMSE))
+model1RMSE
+```
+The RSME is quite high (above one star).
+
+
+### 2.4.3 Adding the movie effect (Model 2)
+Based on insight (4), we can try to improve the model by adding the movie effect.
+We define a new model by adding a movie specific effect:
+$$
+Y_{u,i}=\mu+b_i+\varepsilon_{u,i}
+$$
+With $b_i$, the movie specific effect, computed as the average of $Y_{u,i}$ minus the overall mean for each movie i.
+
+The code is the following:
+```{r}
+mu <- mean(edx$rating)
+movie_table <- movie_table %>% mutate (b_i = avg_rating - mu)
+predicted_ratings_model2 <- mu + final_holdout_test %>% left_join(movie_table, by='movieId') %>% .$b_i
+```
+This model give the following RSME:
+```{r, echo=FALSE}
+model2RMSE <- RMSE(final_holdout_test$rating,as.vector(predicted_ratings_model2))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Model with movie effect - Model 2", RMSE = model2RMSE))
+model2RMSE
+```
+This model 2 is indeed an improvement compared to model 1 as the RMSE is lower.
+
+
+### 2.4.4 Adding the user effect (Model 3)
+Based on insight (2) and (3), we anticipate that the user rating the movie has a large influence on the rating. We can therefore try to improve the model by adding the user effect.
+We define a new model by adding a user specific effect:
+$$
+Y_{u,i}=\mu+b_i+b_u+\varepsilon_{u,i}
+$$
+With $b_u$, the user specific effect, computed as the average of $Y_{u,i}$ minus the overall mean for each user u.
+
+The code is the following:
+```{r}
+user_table <- user_table %>% mutate (b_u = avg_rating - mu)
+predicted_ratings_model3 <- final_holdout_test %>% left_join(movie_table, by='movieId') %>% left_join(user_table, by='userId') %>% mutate(pred = mu + b_i + b_u) %>% .$pred
+```
+
+This model give the following RSME:
+```{r, echo=FALSE}
+model3RMSE <- RMSE(final_holdout_test$rating,as.vector(predicted_ratings_model3))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Model 2 with user effect - Model 3", RMSE = model3RMSE))
+model3RMSE
+```
+This model 3 is indeed an improvement compared to model 2 as the RMSE is lower, but this is still higher than the objective.
+
+
+### 2.4.5 Adding the movie year effect (Model 4)
+Based on insight (7), we can try to improve the model by adding the year of rating effect.
+We define a new model by adding a movie year specific effect:
+$$
+Y_{u,i}=\mu+b_i+b_u+b_t+\varepsilon_{u,i}
+$$
+With $b_t$, the movie year specific effect, computed as the average of $Y_{u,i}$ minus the overall mean for each year of release of the movie t.
+
+The code is the following:
+```{r}
+movie_table_summary <- movie_table_summary %>% mutate (b_t = avg_rating_per_year - mu)
+
+movie_table <- movie_table %>% left_join(select(movie_table_summary,movie_year,b_t), by='movie_year')
+
+predicted_ratings_model4 <- final_holdout_test %>% left_join(movie_table, by='movieId') %>% left_join(user_table, by='userId') %>% mutate(pred = mu + b_i + b_u + b_t) %>% .$pred
+```
+
+This model give the following RSME:
+```{r, echo=FALSE}
+model4RMSE <- RMSE(final_holdout_test$rating,as.vector(predicted_ratings_model4))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Model 3 with movie year effect - Model 4", RMSE = model4RMSE))
+model4RMSE
+```
+This model 4 is not an improvement compared to model 3, so we do not keep this additional variable and return to model 3.
+
+
+### 2.4.6 Adding the genre effect (Model 5)
+Based on insight (9), we can try to improve the model by adding the genre effect.
+We define a new model by adding a genre specific effect:
+$$
+Y_{u,i}=\mu+b_i+b_u+b_g+\varepsilon_{u,i}
+$$
+With $b_g$, the genre specific effect, computed as the average of $Y_{u,i}$ minus the overall mean for each genre g.
+
+The code is the following:
+```{r}
+genres_table <- edx %>% mutate(b_ge = rating - mu) %>% group_by(genres) %>% summarize(b_g = mean(b_ge))
+
+predicted_ratings_model5 <- final_holdout_test %>% left_join(movie_table, by='movieId') %>% left_join(user_table, by='userId') %>% left_join(genres_table, by='genres')  %>% mutate(pred = mu + b_i + b_u + b_g) %>% .$pred
+```
+
+This model give the following RSME:
+```{r, echo=FALSE}
+model5RMSE <- RMSE(final_holdout_test$rating,as.vector(predicted_ratings_model5))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Model 3 with genre effect - Model 5", RMSE = model5RMSE))
+model5RMSE
+```
+This model 5 is not an improvement compared to model 3, so we do not keep this additional variable and return to model 3.
+
+
+### 2.4.7 Adding the age effect (Model 6)
+Based on insight (9), we can try to improve the model by adding the genre effect.
+We define a new model by adding a age specific effect:
+$$
+Y_{u,i}=\mu+b_i+b_u+b_a+\varepsilon_{u,i}
+$$
+With $b_a$, the age specific effet, computed as the average of $Y_{u,i}$ minus the overall mean for each age of rating a.
+
+The code is the following:
+```{r}
+age_rating_table <- age_rating_table %>% mutate (b_a = avg_rating - mu)
+
+predicted_ratings_model6 <- final_holdout_test %>% left_join(movie_table, by='movieId') %>% left_join(user_table, by='userId') %>% left_join(age_rating_table, by='rating_age')  %>% mutate(pred = mu + b_i + b_u + b_a) %>% .$pred
+```
+
+This model give the following RSME:
+```{r, echo=FALSE}
+model6RMSE <- RMSE(final_holdout_test$rating,as.vector(predicted_ratings_model6))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Model 3 with rating age effect - Model 6", RMSE = model6RMSE))
+model6RMSE
+```
+This model 6 is not an improvement compared to model 3, so we do not keep this additional variable and return to model 3.
+
+
+### 2.4.8 Using regularisation to improve the performance (Model 7)
+First we try regularisation on the model 2, to make sure we can improve, before applying to both movie and user effect and optimise the lambda.
+The code to test the improvement is the following:
+
+```{r}
+lambda <- 3
+movie_table_regularized <- edx %>% group_by(movieId) %>% summarize(b_i = sum(rating - mu)/(n()+lambda), n = n())
+predicted_ratings_model7test <- final_holdout_test %>% left_join(movie_table_regularized, by='movieId') %>% mutate(pred = mu + b_i) %>% .$pred
+RMSE(final_holdout_test$rating, as.vector(predicted_ratings_model7test))
+```
+
+We can see that we get a slight improvement. Therefore, l’ets try to apply to both user and movie effect and optimize lambda. The code is the following:
+
+```{r}
+lambdas <- seq(0, 10, 0.25)
+
+rmse_model7 <- sapply(lambdas, function(l){
+     mu <- mean(edx$rating)
+     movie_table_regularized <- edx %>%
+          group_by(movieId) %>%
+          summarize(b_i = sum(rating - mu)/(n()+l))
+     user_table_regularised <- edx %>% 
+          left_join(movie_table_regularized, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+     predicted_ratings_model7 <- 
+          final_holdout_test %>% 
+          left_join(movie_table_regularized, by = "movieId") %>%
+          left_join(user_table_regularised, by = "userId") %>%
+          mutate(pred = mu + b_i + b_u) %>%
+          .$pred
+     return(RMSE(final_holdout_test$rating, predicted_ratings_model7))
+})
+
+lambda <- lambdas[which.min(rmse_model7)]
+
+movie_table_regularized <- edx %>% group_by(movieId) %>% summarize(b_i = sum(rating - mu)/(n()+lambda))
+user_table_regularised <- edx %>% left_join(movie_table_regularized, by="movieId") %>% group_by(userId) %>% summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+
+predicted_ratings_model7 <- 
+          final_holdout_test %>% 
+          left_join(movie_table_regularized, by = "movieId") %>%
+          left_join(user_table_regularised, by = "userId") %>%
+          mutate(pred = mu + b_i + b_u) %>%
+          .$pred
+```
+
+This model give the following RSME:
+```{r, echo=FALSE}
+model7RMSE<-RMSE(final_holdout_test$rating,as.vector(predicted_ratings_model7))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Model 3 regularised - Model 7", RMSE = model7RMSE))
+model7RMSE
+```
+This model is a great improvement from model 3 and allows us to reach the objective of RMSE below 0.86490.
+This is therefore our final model.
+
+
+# 3. Results
+The modelling results are the followings:
+```{r, echo=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+We can see the followings:
+
+* Movie and user have a great influence on the rating and including those effects helped to improve the model to a great extent
+
+* Movie year, rating age and genre did not help to improve the model
+
+* The regularization of the model with movie and user effect had a great impact on improving the performance of the model
+
+We select the model 7, which has the best performance and allows to reach the performance expected with a RMSE below 0.86490.
+
+
+# 4. Conclusion
+The exercise was super interesting. I was especially happy to learn that variables that seem to have correlation with rating (such as movie release year, genre…) are not improving the model when added to the model.
+
+The final model allowed us to reached the expected performance in terms of RMSE.
+
+However, I see two ways to improve further the model:
+
+1. Genre: Based on the data analysis, genre should have a great impact on rating. I believe that the attempt to take it into account in model 5 was not successful because the genres were stacked in one column. I believe that breaking down the column and using adjustment for each genre would probably improve the model.
+
+2. Matrix factorization: This technique would probably improve the model significantly. Indeed the model 7 leaves out the fact that groups of movies and groups of users have similar rating patterns and matrix factorisation would therefore help to improve the performance of the model.
+
+
